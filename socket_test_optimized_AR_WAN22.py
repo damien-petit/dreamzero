@@ -13,6 +13,8 @@ import datetime
 import imageio
 import numpy as np
 
+import cv2
+
 import huggingface_hub
 import transformers
 
@@ -128,13 +130,23 @@ class ARDroidRoboarenaPolicy:
             "observation/wrist_image_left": "video.wrist_image_left",
         }
         
+        # ADDED: Target resolution required by the model
+        TARGET_H, TARGET_W = 160, 320
+
         for roboarena_key, droid_key in image_key_mapping.items():
             if roboarena_key in obs:
                 data = obs[roboarena_key]
                 if isinstance(data, np.ndarray):
-                    if data.ndim == 4:
-                        self._frame_buffers[droid_key].extend(list(data))
-                    else:
+                    if data.ndim == 4: # Batch of frames
+                        resized_frames = []
+                        for frame in data:
+                            if frame.shape[0] != TARGET_H or frame.shape[1] != TARGET_W:
+                                frame = cv2.resize(frame, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
+                            resized_frames.append(frame)
+                        self._frame_buffers[droid_key].extend(resized_frames)
+                    else: # Single frame
+                        if data.shape[0] != TARGET_H or data.shape[1] != TARGET_W:
+                            data = cv2.resize(data, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
                         self._frame_buffers[droid_key].append(data)
 
         num_frames = 1 if self._is_first_call else self.FRAMES_PER_CHUNK
