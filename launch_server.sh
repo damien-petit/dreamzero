@@ -1,0 +1,1 @@
+TORCH_COMPILE_DISABLE=1 CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.run --standalone --nproc_per_node=1 socket_test_optimized_AR.py --port 5000 --enable-dit-cache --model-path ./checkpoints/DreamZero-DROID --wan-path ./checkpoints/Wan2.1-I2V-14B-480P --text-encoder-path ./checkpoints/umt5-xxl
