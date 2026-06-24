@@ -38,7 +38,7 @@ if [ ! -d "$DREAMZERO_ROOT/groot" ]; then
 fi
 
 # ============ USER CONFIGURATION ============
-NUM_GPUS=${NUM_GPUS:-8}
+NUM_GPUS=${NUM_GPUS:-1}
 DROID_DATA_ROOT=${DROID_DATA_ROOT:-"$DREAMZERO_ROOT/data/droid_lerobot"}
 # If env set the old relative default, resolve to repo root (e.g. Beaker image env)
 if [ "$DROID_DATA_ROOT" = "./data/droid_lerobot" ]; then
@@ -116,7 +116,6 @@ cd "$DREAMZERO_ROOT"
     num_state_per_block=1 \
     seed=42 \
     training_args.learning_rate=1e-5 \
-    training_args.deepspeed="groot/vla/configs/deepspeed/zero2.json" \
     save_steps=1000 \
     training_args.warmup_ratio=0.05 \
     output_dir=$OUTPUT_DIR \
