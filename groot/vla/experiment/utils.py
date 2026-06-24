@@ -98,6 +98,11 @@ def safe_save_model_for_hf_trainer(trainer: Trainer, output_dir: str):
     if trainer.args.should_save:
         cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
         del state_dict
+        # ADDED: Prevent crash by giving the custom tokenizer a dummy save method
+        if hasattr(trainer, "data_collator") and hasattr(trainer.data_collator, "tokenizer"):
+            if not hasattr(trainer.data_collator.tokenizer, "save_pretrained"):
+                trainer.data_collator.tokenizer.save_pretrained = lambda *args, **kwargs: None
+
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 
