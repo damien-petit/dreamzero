@@ -1358,10 +1358,14 @@ class WANPolicyHead(ActionHead):
         import os
         ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
         LOAD_TRT_ENGINE = os.getenv("LOAD_TRT_ENGINE", None)
+        DISABLE_COMPILE = (
+            os.getenv("TORCH_COMPILE_DISABLE") is not None
+            or os.getenv("TORCHDYNAMO_DISABLE") is not None
+        )
 
         # Torch compile the modules. Skip _forward_blocks: Dynamo with fullgraph can fail on
         # shape variation (e.g. x [1,50,C] vs e [1,200,C]); the block aligns e to x at runtime.
-        if not ENABLE_TENSORRT:
+        if not ENABLE_TENSORRT and not DISABLE_COMPILE:
             print("Torch compiling the TextEncoder, ImageEncoder, and VAE modules (Wan _forward_blocks not compiled).")
 
             self.text_encoder.forward = torch.compile(
@@ -1375,6 +1379,8 @@ class WANPolicyHead(ActionHead):
             self.vae.model.encode = torch.compile(
                 mode="reduce-overhead", fullgraph=True, dynamic=False,
             )(self.vae.model.encode)
+        elif DISABLE_COMPILE:
+            print("torch.compile disabled (TORCH_COMPILE_DISABLE/TORCHDYNAMO_DISABLE set). Running TextEncoder, ImageEncoder, VAE uncompiled.")
         
         self.trt_engine = None
         if LOAD_TRT_ENGINE is not None:
