@@ -1,0 +1,221 @@
+===============================================================================
+  UR5e — Data Collection, GEAR Conversion, and DreamZero Fine-Tuning
+===============================================================================
+
+Prerequisites
+-------------
+  - UR5e robot reachable at 100.80.196.7 with RTDE enabled
+      (pendant: Settings → System → Real-Time Data Exchange → ON)
+  - 3 cameras physically connected:
+      left_camera  — USB camera,  /dev/video0  (or set --left-camera-id)
+      right_camera — ZED2i,       auto-detected by pyzed
+      wrist_camera — USB camera,  /dev/video2  (or set --wrist-camera-id)
+  - ZED SDK installed system-wide (sudo ./ZED_SDK.run -- silent skip_cuda_check)
+  - dreamzero conda environment activated with all Python deps
+
+Activate the environment (run this in every new terminal):
+  source /home/d/miniconda3/bin/activate dreamzero
+
+Check camera device indices:
+  ls /dev/video*
+
+
+===============================================================================
+STEP 1 — Record demonstrations
+===============================================================================
+
+Each "episode" = one pendant program execution recorded from start to finish.
+
+Run:
+  python3 scripts/data/record_ur5e.py \
+      --output-dir ./data/ur5e_dataset \
+      --left-camera-id 0 \
+      --wrist-camera-id 2 \
+      --fps 15 \
+      --task "describe the task here"
+
+Controls:
+  - Press Enter        → start recording an episode
+  - Press Enter again  → stop recording and save
+  - Type x + Enter     → quit
+
+Between recordings:
+  - Reset the robot to start position on the pendant
+  - Start the program on the pendant
+  - Then press Enter in the recorder to begin capturing
+
+Repeat for each episode. Aim for at least 50 episodes per task.
+
+To resume a previous session (append episodes):
+  python3 scripts/data/record_ur5e.py \
+      --output-dir ./data/ur5e_dataset \
+      --task "describe the task here" \
+      --episode-start <N>    # N = number of episodes already saved
+
+Output structure after recording:
+  data/ur5e_dataset/
+    data/chunk-000/
+      episode_000000.parquet
+      episode_000001.parquet
+      ...
+    videos/chunk-000/
+      observation.images.left_camera/episode_000000.mp4  ...
+      observation.images.right_camera/episode_000000.mp4 ...
+      observation.images.wrist_camera/episode_000000.mp4 ...
+    meta/
+      info.json
+
+Verify a parquet file:
+  python3 -c "
+  import pandas as pd
+  df = pd.read_parquet('data/ur5e_dataset/data/chunk-000/episode_000000.parquet')
+  print(df.shape, df.columns.tolist())
+  print(df['observation.state'].iloc[0])
+  "
+  Expected: shape (T, 5), columns include observation.state, action, timestamp,
+            frame_index, annotation.task.
+  observation.state has 7 values: [j0, j1, j2, j3, j4, j5, gripper]
+
+Verify a video:
+  ffplay data/ur5e_dataset/videos/chunk-000/observation.images.left_camera/episode_000000.mp4
+
+
+===============================================================================
+STEP 2 — Convert to GEAR format
+===============================================================================
+
+This step generates the metadata files DreamZero needs for training.
+It does NOT modify your parquet files or videos.
+
+  python3 scripts/data/convert_lerobot_to_gear.py \
+      --dataset-path ./data/ur5e_dataset \
+      --embodiment-tag ur5e \
+      --state-keys '{"joint_position": [0, 6], "gripper_position": [6, 7]}' \
+      --action-keys '{"joint_position": [0, 6], "gripper_position": [6, 7]}' \
+      --relative-action-keys joint_position \
+      --task-key annotation.task
+
+Generated files (under data/ur5e_dataset/meta/):
+  modality.json                   — maps state/action/video/annotation keys
+  embodiment.json                 — {"embodiment_tag": "ur5e"}
+  stats.json                      — per-feature statistics (mean, std, min, max, q01, q99)
+  relative_stats_dreamzero.json   — relative action statistics (action − reference state)
+  tasks.jsonl                     — unique task descriptions
+  episodes.jsonl                  — per-episode metadata (index, length, tasks)
+
+Verify conversion:
+  python3 -c "
+  import json
+  m = json.load(open('data/ur5e_dataset/meta/modality.json'))
+  print('State keys:',  list(m['state'].keys()))
+  print('Action keys:', list(m['action'].keys()))
+  print('Video keys:',  list(m['video'].keys()))
+  s = json.load(open('data/ur5e_dataset/meta/stats.json'))
+  print('Stats keys:', list(s.keys()))
+  "
+  Expected video keys: left_camera, right_camera, wrist_camera
+  Expected state/action keys: joint_position, gripper_position
+
+
+===============================================================================
+STEP 3 — Fine-tune DreamZero on the UR5e dataset
+===============================================================================
+
+---- Option A: Wan2.2 5B backbone (recommended — single GPU, faster) ----
+
+  DATA_ROOT=./data/ur5e_dataset bash scripts/train/ur5e_training.sh
+
+  Default settings:
+    BACKBONE=wan22         (Wan2.2-TI2V-5B, 160×320)
+    NUM_GPUS=1
+    max_steps=5000
+    lora_rank=default (4)
+    OUTPUT_DIR=./checkpoints/dreamzero_ur5e_wan22_lora
+
+---- Option B: Wan2.1 14B backbone (higher capacity — needs 2+ GPUs) ----
+
+  BACKBONE=wan21 NUM_GPUS=2 DATA_ROOT=./data/ur5e_dataset bash scripts/train/ur5e_training.sh
+
+  Default settings:
+    BACKBONE=wan21         (Wan2.1-I2V-14B, 176×320)
+    max_steps=5000
+    OUTPUT_DIR=./checkpoints/dreamzero_ur5e_wan21_lora
+
+Checkpoints are saved every 1000 steps under OUTPUT_DIR/.
+To monitor training loss: set WANDB_MODE=online (requires wandb login).
+
+Useful overrides:
+  NUM_GPUS=1 max_steps=100 DATA_ROOT=... bash scripts/train/ur5e_training.sh   # quick sanity check
+  OUTPUT_DIR=./checkpoints/my_run DATA_ROOT=... bash scripts/train/ur5e_training.sh
+
+
+===============================================================================
+STEP 4 — Verify training succeeded
+===============================================================================
+
+Check that checkpoints exist:
+  ls ./checkpoints/dreamzero_ur5e_wan22_lora/
+
+Expected files in a checkpoint directory:
+  config.json
+  adapter_model.safetensors  (LoRA weights)
+  adapter_config.json
+
+Run standalone inference on debug frames:
+  TORCH_COMPILE_DISABLE=1 python3 test_wan22_standalone.py \
+      --model_path ./checkpoints/dreamzero_ur5e_wan22_lora \
+      --output_dir ./checkpoints/ur5e_eval
+
+Check the output video:
+  ffplay ./checkpoints/ur5e_eval/<timestamp>_standalone.mp4
+
+
+===============================================================================
+Config files added to the repo for the ur5e embodiment
+===============================================================================
+
+  groot/vla/data/schema/embodiment_tags.py
+    → EmbodimentTag.UR5E = "ur5e"
+
+  scripts/data/convert_lerobot_to_gear.py
+    → "ur5e" added to VALID_EMBODIMENT_TAGS
+
+  groot/vla/configs/data/dreamzero/base_48_wan_fine_aug_relative.yaml
+    → modality_config_ur5e  (3 cameras: left_camera, right_camera, wrist_camera)
+    → transform_ur5e
+    → ur5e registered in modality_configs, transforms, metadata_versions, fps maps
+
+  groot/vla/configs/data/dreamzero/ur5e_relative.yaml
+    → dataset config for training (relative actions on joint_position)
+
+  scripts/train/ur5e_training.sh
+    → training script supporting both Wan2.2 (BACKBONE=wan22) and Wan2.1 (BACKBONE=wan21)
+
+  scripts/data/record_ur5e.py
+    → data collection script (robot IP default: 100.80.196.7)
+
+
+===============================================================================
+Troubleshooting
+===============================================================================
+
+"No module named 'rtde_receive'"
+  → pip install ur_rtde  (requires Boost: conda install -c conda-forge boost ncurses)
+
+"pyzed not installed"
+  → source /home/d/miniconda3/bin/activate dreamzero
+  → python /usr/local/zed/get_python_api.py
+
+"Cannot open camera device N"
+  → ls /dev/video* to find the correct index, update --left-camera-id / --wrist-camera-id
+
+"meta/embodiment.json missing" during training
+  → Run Step 2 (convert_lerobot_to_gear.py) first
+
+"CUDA out of memory" during training
+  → Reduce per_device_train_batch_size or use BACKBONE=wan22 (5B uses less VRAM)
+
+RTDE connection refused
+  → Confirm RTDE is enabled on pendant (Settings → System → Real-Time Data Exchange)
+  → Confirm robot IP is 100.80.196.7 and machine is on the same network
+===============================================================================
