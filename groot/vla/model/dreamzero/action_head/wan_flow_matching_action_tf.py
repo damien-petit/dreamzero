@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import logging
 import time
@@ -35,6 +36,16 @@ def ensure_file(path: str | None, hf_filename: str, repo_id: str = WAN_HF_REPO_I
     if path is not None and os.path.exists(path):
         return path
     return hf_download(hf_filename, repo_id)
+
+
+def load_cpu_state_dict(path: str):
+    """torch.load with mmap so the checkpoint pages stay file-backed (evictable)
+    instead of spiking anonymous host RAM. Falls back for legacy formats."""
+    import torch
+    try:
+        return torch.load(path, map_location="cpu", mmap=True)
+    except Exception:
+        return torch.load(path, map_location="cpu")
 
 from torch.distributions import Beta
 import torch.distributed as dist
@@ -158,6 +169,18 @@ class WANPolicyHead(ActionHead):
     config_class = WANPolicyHeadConfig
     supports_gradient_checkpointing = True
 
+    @contextmanager
+    def _default_dtype_ctx(self):
+        if not getattr(self, "_bf16_init", False):
+            yield
+            return
+        prev = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            yield
+        finally:
+            torch.set_default_dtype(prev)
+
     def __init__(
         self,
         config: WANPolicyHeadConfig,
@@ -171,15 +194,22 @@ class WANPolicyHead(ActionHead):
         self.num_frame_per_block = config.num_frame_per_block
         self.hidden_size = config.hidden_size
         self.num_frames = config.num_frames
-        self.text_encoder = instantiate(config.text_encoder_cfg)
-        self.image_encoder = instantiate(config.image_encoder_cfg)
-        self.vae = instantiate(config.vae_cfg)
+        # DZ_BF16_INIT: instantiate the large components directly in bf16 to halve the
+        # host-RAM peak (inference only — training needs fp32 masters). Params/buffers
+        # end up bf16 either way via post_initialize; RoPE freqs are explicit fp64/complex.
+        self._bf16_init = os.getenv("DZ_BF16_INIT", "0") == "1"
+        with self._default_dtype_ctx():
+            self.text_encoder = instantiate(config.text_encoder_cfg)
+            self.image_encoder = instantiate(config.image_encoder_cfg)
+            self.vae = instantiate(config.vae_cfg)
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.model_names = ['text_encoder']
 
-        self.num_inference_steps = 16 
+        self.num_inference_steps = 16
         self.seed = 1140
-        self.cfg_scale = 5.0
+        # DZ_CFG_SCALE=1.0 disables classifier-free guidance: halves KV/cross-attn
+        # cache memory and diffusion compute (needed to fit 32GB GPUs).
+        self.cfg_scale = float(os.getenv("DZ_CFG_SCALE", "5.0"))
         self.denoising_strength = 1.0
         self.sigma_shift = 5.0
         self.kv_cache1: KVCacheType | None = None
@@ -233,8 +263,11 @@ class WANPolicyHead(ActionHead):
         self.input_embedding_dim = config.input_embedding_dim
 
         self.cpu_offload = False
+        self._dit_fp8 = False
+        self._cached_prompt_embs = None
 
-        self.model = instantiate(config.diffusion_model_cfg)
+        with self._default_dtype_ctx():
+            self.model = instantiate(config.diffusion_model_cfg)
         self.action_dim = config.action_dim
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
@@ -243,13 +276,13 @@ class WANPolicyHead(ActionHead):
             self.text_encoder.text_encoder_pretrained_path,
             "models_t5_umt5-xxl-enc-bf16.pth",
         )
-        self.text_encoder.load_state_dict(torch.load(text_enc_path, map_location='cpu'))
+        self.text_encoder.load_state_dict(load_cpu_state_dict(text_enc_path))
 
         img_enc_path = ensure_file(
             self.image_encoder.image_encoder_pretrained_path,
             "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
         )
-        self.image_encoder.model.load_state_dict(torch.load(img_enc_path, map_location='cpu'), strict=False)
+        self.image_encoder.model.load_state_dict(load_cpu_state_dict(img_enc_path), strict=False)
 
         # Wan2.2 (WanVideoVAE38, z_dim=48) uses Wan2.2_VAE.pth; Wan2.1 uses Wan2.1_VAE.pth
         vae_hf_filename = "Wan2.2_VAE.pth" if getattr(self.vae, "z_dim", 16) == 48 else "Wan2.1_VAE.pth"
@@ -259,7 +292,7 @@ class WANPolicyHead(ActionHead):
             vae_hf_filename,
             repo_id=vae_repo_id,
         )
-        self.vae.model.load_state_dict(torch.load(vae_path, map_location='cpu'))
+        self.vae.model.load_state_dict(load_cpu_state_dict(vae_path))
 
         if not config.skip_component_loading:
             dit_dir = self.model.diffusion_model_pretrained_path
@@ -446,6 +479,34 @@ class WANPolicyHead(ActionHead):
         )
 
         self.cpu_offload = True
+
+    def quantize_dit_fp8(self):
+        # Quantize the DiT transformer blocks to float8_e4m3fn (weights stored fp8 on GPU,
+        # matmuls via torch._scaled_mm in AutoWrappedLinear.fp8_linear). Embeddings, norms,
+        # modulation, head, and action encoder/decoder stay bf16 for stability.
+        # Must run while the model is still on CPU, after the eval_bf16 cast.
+        module_config = dict(
+            offload_dtype=torch.float8_e4m3fn,
+            offload_device=self._device,
+            onload_dtype=torch.float8_e4m3fn,
+            onload_device=self._device,
+            computation_dtype=torch.float8_e4m3fn,
+            computation_device=self._device,
+        )
+        enable_vram_management(
+            self.model.blocks,
+            module_map={torch.nn.Linear: AutoWrappedLinear},
+            module_config=module_config,
+        )
+        num_quantized = 0
+        for module in self.model.blocks.modules():
+            if isinstance(module, AutoWrappedLinear):
+                module.weight.data = (
+                    module.weight.data.clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+                )
+                num_quantized += module.weight.numel()
+        print(f"[FP8] Quantized {num_quantized / 1e9:.2f}B DiT block params to float8_e4m3fn")
+        self._dit_fp8 = True
 
     def load_models_to_device(self, loadmodel_names=[]):
         # only load models to device if cpu_offload is enabled
@@ -1028,14 +1089,17 @@ class WANPolicyHead(ActionHead):
                     align_corners=False,
                 ).reshape(b, c, t, target_h, target_w)
 
+        language_changed = False
         if self.language is None:
             print("language is None, reset current_start_frame to 0")
             self.language = data["text"]
             self.current_start_frame = 0
+            language_changed = True
         elif not torch.equal(self.language, data["text"]):
             print("language changed, reset current_start_frame to 0")
             self.current_start_frame = 0
             self.language = data["text"]
+            language_changed = True
         elif videos.shape[2] == 1:
             print("videos.shape[2] == 1, reset current_start_frame to 0")
             self.current_start_frame = 0
@@ -1048,8 +1112,10 @@ class WANPolicyHead(ActionHead):
 
         start_text_encoder_event.record()
 
-        text_inputs = self._prepare_text_inputs(data)
-        prompt_embs = [self.encode_prompt(text, attention_mask) for text, attention_mask in text_inputs]
+        if self._cached_prompt_embs is None or language_changed:
+            text_inputs = self._prepare_text_inputs(data)
+            self._cached_prompt_embs = [self.encode_prompt(text, attention_mask) for text, attention_mask in text_inputs]
+        prompt_embs = self._cached_prompt_embs
 
         end_text_encoder_event.record()
         
@@ -1063,7 +1129,12 @@ class WANPolicyHead(ActionHead):
             image = videos[:, :, :1].transpose(1, 2)
 
         if self.current_start_frame == 0:
+            if self.cpu_offload:
+                self.image_encoder.to(self._device)
             clip_feas, ys, image = self.encode_image(image, self.num_frames, height, width)
+            if self.cpu_offload:
+                self.image_encoder.to("cpu")
+                torch.cuda.empty_cache()
             self.clip_feas = clip_feas.to(dtype=image.dtype)
             self.ys = ys.to(dtype=image.dtype)
         
@@ -1272,9 +1343,12 @@ class WANPolicyHead(ActionHead):
                     ),
                 )
                 flow_pred_cond, flow_pred_cond_action = predictions[0]
-                flow_pred_uncond, flow_pred_uncond_action = predictions[1]
-
-                flow_pred = flow_pred_uncond + self.cfg_scale * (flow_pred_cond - flow_pred_uncond)
+                if len(predictions) > 1:
+                    flow_pred_uncond, flow_pred_uncond_action = predictions[1]
+                    flow_pred = flow_pred_uncond + self.cfg_scale * (flow_pred_cond - flow_pred_uncond)
+                else:
+                    # cfg_scale == 1.0: no unconditional branch was run
+                    flow_pred = flow_pred_cond
                 prev_predictions.append((current_timestep, flow_pred, flow_pred_cond_action))
                 max_cache_size = 2
                 if len(prev_predictions) > max_cache_size:
@@ -1351,9 +1425,19 @@ class WANPolicyHead(ActionHead):
     def post_initialize(self):
         # Move models to the cuda device and set the dtype to bfloat16.
         print("Moving models to the cuda device and setting the dtype to bfloat16.")
-        self.model.to(device=self._device, dtype=torch.bfloat16)
-        self.text_encoder.to(device=self._device, dtype=torch.bfloat16)
-        self.image_encoder.to(device=self._device, dtype=torch.bfloat16)
+        if self._dit_fp8:
+            # Device-only move: a dtype cast would silently dequantize fp8 back to bf16.
+            self.model.to(device=self._device)
+        else:
+            self.model.to(device=self._device, dtype=torch.bfloat16)
+        if self.cpu_offload:
+            print("Text encoder CPU offload enabled; keeping text encoder on CPU.")
+            # CLIP only runs once per episode; keep it on CPU and move it to the GPU
+            # transiently around encode_image (see lazy_joint_video_action).
+            self.image_encoder.to(dtype=torch.bfloat16)
+        else:
+            self.text_encoder.to(device=self._device, dtype=torch.bfloat16)
+            self.image_encoder.to(device=self._device, dtype=torch.bfloat16)
         self.vae.to(device=self._device, dtype=torch.bfloat16)
         import os
         ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
@@ -1368,13 +1452,15 @@ class WANPolicyHead(ActionHead):
         if not ENABLE_TENSORRT and not DISABLE_COMPILE:
             print("Torch compiling the TextEncoder, ImageEncoder, and VAE modules (Wan _forward_blocks not compiled).")
 
-            self.text_encoder.forward = torch.compile(
-                mode="reduce-overhead", fullgraph=True, dynamic=False,
-            )(self.text_encoder.forward)
+            if not self.cpu_offload:
+                # The vram-management wrappers move weights per-call, which breaks fullgraph compile.
+                self.text_encoder.forward = torch.compile(
+                    mode="reduce-overhead", fullgraph=True, dynamic=False,
+                )(self.text_encoder.forward)
 
-            self.image_encoder.model.visual.forward = torch.compile(
-                mode="reduce-overhead", fullgraph=True, dynamic=False,
-            )(self.image_encoder.model.visual.forward)
+                self.image_encoder.model.visual.forward = torch.compile(
+                    mode="reduce-overhead", fullgraph=True, dynamic=False,
+                )(self.image_encoder.model.visual.forward)
 
             self.vae.model.encode = torch.compile(
                 mode="reduce-overhead", fullgraph=True, dynamic=False,
@@ -1400,6 +1486,10 @@ class WANPolicyHead(ActionHead):
 
     @property
     def device(self):
+        if getattr(self, "cpu_offload", False):
+            # text_encoder (the first registered submodule) stays on CPU when
+            # offloading; the DiT reflects the actual compute device.
+            return next(iter(self.model.parameters())).device
         return next(iter(self.parameters())).device
 
     @property

@@ -89,6 +89,9 @@ class Args:
     enable_dit_cache: bool = False
     index: int = 0
     max_chunk_size: int | None = None
+    fp8_dit: bool = False
+    offload_text_encoder: bool = False
+    low_vram: bool = False  # implies fp8_dit + offload_text_encoder
 
 
 class ARDroidRoboarenaPolicy:
@@ -471,6 +474,20 @@ def _health_check(connection: _server.ServerConnection, request: _server.Request
 def main(args: Args) -> None:
     os.environ["ENABLE_DIT_CACHE"] = "true" if args.enable_dit_cache else "false"
     os.environ["ATTENTION_BACKEND"] = "FA2"
+    if args.low_vram:
+        args.fp8_dit = True
+        args.offload_text_encoder = True
+        # Reduce allocator fragmentation; must be set before the first CUDA allocation.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        # Disable CFG by default in low-VRAM mode: the pos+neg KV caches (~13 GB at
+        # episode end with global attention) don't fit on 32GB alongside the weights.
+        # Override with DZ_CFG_SCALE=5.0 if you have the headroom (e.g. 2 GPUs).
+        os.environ.setdefault("DZ_CFG_SCALE", "1.0")
+    os.environ["DZ_FP8_DIT"] = "1" if args.fp8_dit else "0"
+    os.environ["DZ_OFFLOAD_TEXT_ENCODER"] = "1" if args.offload_text_encoder else "0"
+    # Halve the host-RAM peak by instantiating components directly in bf16 (they are
+    # cast to bf16 for inference anyway).
+    os.environ["DZ_BF16_INIT"] = "1" if args.low_vram else os.environ.get("DZ_BF16_INIT", "0")
     torch._dynamo.config.recompile_limit = 800
 
     embodiment_tag = "oxe_droid"

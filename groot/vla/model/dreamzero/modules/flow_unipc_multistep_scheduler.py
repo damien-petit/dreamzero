@@ -3,6 +3,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
 import math
+import os
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -12,6 +13,13 @@ from diffusers.schedulers.scheduling_utils import (
     KarrasDiffusionSchedulers,
     SchedulerMixin,
     SchedulerOutput,
+)
+
+# fullgraph=True raises at runtime when Dynamo is disabled (e.g. Blackwell GPUs run
+# with TORCH_COMPILE_DISABLE=1), so the decorations below must be disabled explicitly.
+DISABLE_TORCH_COMPILE = (
+    os.getenv("TORCH_COMPILE_DISABLE") is not None
+    or os.getenv("TORCHDYNAMO_DISABLE") is not None
 )
 
 
@@ -293,7 +301,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
 
             return epsilon
 
-    @torch.compile(mode="reduce-overhead", fullgraph=True, dynamic=False)
+    @torch.compile(mode="reduce-overhead", fullgraph=True, dynamic=False, disable=DISABLE_TORCH_COMPILE)
     def multistep_uni_p_bh_update(
         self,
         model_output: torch.Tensor,
@@ -405,7 +413,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         x_t = x_t.to(x.dtype)
         return x_t
 
-    @torch.compile(mode="reduce-overhead", fullgraph=True, dynamic=False)
+    @torch.compile(mode="reduce-overhead", fullgraph=True, dynamic=False, disable=DISABLE_TORCH_COMPILE)
     def multistep_uni_c_bh_update(
         self,
         this_model_output: torch.Tensor,

@@ -136,7 +136,7 @@ class AutoWrappedLinear(torch.nn.Linear, AutoTorchModule):
         input = input / (scale_a + 1e-8)
         input = input.to(self.computation_dtype)
         weight = weight.to(self.computation_dtype)
-        bias = bias.to(torch.bfloat16)
+        bias = bias.to(torch.bfloat16) if bias is not None else None
 
         result = torch._scaled_mm(
             input,

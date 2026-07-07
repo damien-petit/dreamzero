@@ -1,5 +1,6 @@
 import importlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -333,9 +334,27 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         if self.eval_bf16 and not lazy_load:
             model = model.to(dtype=torch.bfloat16)
 
+        # Low-VRAM options: must be applied on CPU, after the eval_bf16 cast and
+        # before the device move (a later dtype cast would dequantize the fp8 weights).
+        fp8_dit = os.getenv("DZ_FP8_DIT", "0") == "1"
+        offload_text_encoder = os.getenv("DZ_OFFLOAD_TEXT_ENCODER", "0") == "1"
+        action_head = getattr(model, "action_head", None)
+        if fp8_dit:
+            action_head.quantize_dit_fp8()
+        if offload_text_encoder:
+            print("Enabling text encoder CPU offload")
+            action_head.enable_vram_management()
+
         # Store model initially on CPU if lazy loading
         if lazy_load:
             model.to(device='cpu')
+        elif offload_text_encoder and action_head is not None:
+            # Keep the ~11GB T5 off the GPU: detach it during the device move, then
+            # reattach on CPU. Its wrapped modules stream weights to GPU per forward.
+            text_encoder = action_head.text_encoder
+            action_head.text_encoder = None
+            model.to(device=device)
+            action_head.text_encoder = text_encoder
         else:
             model.to(device=device)
 
