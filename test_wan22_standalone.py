@@ -35,11 +35,18 @@ if not dist.is_initialized():
 torch._dynamo.config.recompile_limit = 800
 
 from groot.vla.model.n1_5.sim_policy import GrootSimPolicy
+import argparse
 from groot.vla.data.schema import EmbodimentTag
 
-MODEL_PATH = "./checkpoints/dreamzero_droid_wan22_lora"
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--model_path", default="./checkpoints/dreamzero_droid_wan22_lora")
+_parser.add_argument("--output_dir", default=None)
+_args, _ = _parser.parse_known_args()
+
+MODEL_PATH = _args.model_path
 VIDEO_DIR = "./debug_image"
-OUTPUT_DIR = "./checkpoints/real_world_eval_gen_test/dreamzero_droid_wan22_lora"
+_default_out = "real_world_eval_gen_test/" + os.path.basename(MODEL_PATH.rstrip("/"))
+OUTPUT_DIR = _args.output_dir or f"./checkpoints/{_default_out}"
 PROMPT = "Move the pan forward and use the brush in the middle of the plates to brush the inside of the pan"
 
 CAMERA_FILES = {
@@ -66,7 +73,24 @@ def load_video_frames(path: str) -> np.ndarray:
     return np.stack(frames)
 
 
-TARGET_H, TARGET_W = 160, 320  # WAN22 model native resolution
+def get_model_resolution(model_path):
+    """Read target H×W from config.json; fall back to 14B native 180×320."""
+    import json
+    cfg_path = os.path.join(model_path, "config.json")
+    try:
+        cfg = json.load(open(cfg_path))
+        ah = cfg.get("action_head_cfg", {}).get("config", {})
+        h = ah.get("target_video_height")
+        w = ah.get("target_video_width")
+        if h and w:
+            return int(h), int(w)
+    except Exception:
+        pass
+    return 180, 320  # 14B native (no config resolution): pass native-ish size
+
+
+TARGET_H, TARGET_W = get_model_resolution(MODEL_PATH)  # per-model resolution
+print(f"Target resolution for {MODEL_PATH}: {TARGET_H}×{TARGET_W}")
 
 
 def resize_frames(frames: np.ndarray) -> np.ndarray:
