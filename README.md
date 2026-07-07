@@ -133,6 +133,8 @@ The inference server uses PyTorch distributed training utilities to parallelize 
 CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --standalone --nproc_per_node=2 socket_test_optimized_AR.py --port 5000 --enable-dit-cache --model-path <path/to/checkpoint>
 ```
 
+**Single 32 GB GPU (e.g. RTX 5090):** the 14B model also runs on one consumer GPU with the `--low-vram` flag (FP8 DiT + CPU-offloaded text encoder). See [docs/RTX5090_LOW_VRAM_INFERENCE.md](docs/RTX5090_LOW_VRAM_INFERENCE.md) for the procedure, measured memory/latency, and trade-offs.
+
 (Optional only for GB200) Tensorrt enables faster generation
 ```bash
 export LOAD_TRT_ENGINE=<path/to/checkpoint>/tensorrt/wan/WanModel_nvfp4.trt 
