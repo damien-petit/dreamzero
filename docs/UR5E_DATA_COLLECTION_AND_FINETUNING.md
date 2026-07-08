@@ -2,6 +2,11 @@
 
 Step-by-step guide to record demonstrations with a UR5e robot, convert them to GEAR format, and fine-tune a DreamZero policy on the new embodiment.
 
+> **Recording on the lab RTX 5090 (x86_64) machine?** See
+> [UR5E_RTX5090_DATA_CAPTURE.md](UR5E_RTX5090_DATA_CAPTURE.md) for that
+> machine's camera setup (stable `/dev/v4l/by-path` devices, live viewer) and
+> the URCap-based gripper readout (`--gripper-urcap`).
+
 ---
 
 ## Prerequisites

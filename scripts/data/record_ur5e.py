@@ -32,6 +32,7 @@ After recording, convert to GEAR format:
 
 import argparse
 import json
+import socket
 import sys
 import threading
 import time
@@ -61,6 +62,11 @@ except ImportError:
 
 
 CAMERA_NAMES = ["left_camera", "right_camera", "wrist_camera"]
+
+# Stable USB-port-based device paths (lab RTX 5090 machine) — survive reboots,
+# unlike bare cv2 indices. Tied to the physical port each camera is plugged into.
+DEFAULT_LEFT_CAMERA = "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:5:1.0-video-index0"
+DEFAULT_WRIST_CAMERA = "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:8:1.0-video-index0"
 STATE_DIM = 7   # 6 joints + 1 gripper
 ACTION_DIM = 7
 CHUNKS_SIZE = 1000
@@ -101,12 +107,38 @@ class MockCamera:
 
 
 # ---------------------------------------------------------------------------
+# Gripper backends
+# ---------------------------------------------------------------------------
+
+class URCapGripper:
+    """Robotiq gripper wired to the UR tool connector, read through the socket
+    server the Robotiq URCap runs on the controller (ASCII protocol, port 63352)."""
+
+    PORT = 63352
+
+    def __init__(self, robot_ip: str, timeout: float = 2.0):
+        self.sock = socket.create_connection((robot_ip, self.PORT), timeout=timeout)
+
+    def get_current_position(self) -> int:
+        self.sock.sendall(b"GET POS\n")
+        reply = self.sock.recv(1024).decode("ascii")  # e.g. "POS 77"
+        return int(reply.split()[1])
+
+    def close(self):
+        self.sock.close()
+
+
+# ---------------------------------------------------------------------------
 # Camera backends
 # ---------------------------------------------------------------------------
 
 class CV2Camera:
-    def __init__(self, device_id: int, fps: int):
-        self.cap = cv2.VideoCapture(device_id)
+    def __init__(self, device_id, fps: int):
+        # device_id: int index, or a stable device path such as
+        # /dev/v4l/by-path/...-video-index0 (USB indices shuffle across reboots)
+        self.cap = cv2.VideoCapture(device_id, cv2.CAP_V4L2)
+        # MJPG keeps two USB cams + ZED within USB bandwidth (raw YUYV can starve)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_FPS, fps)
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open camera device {device_id}")
@@ -138,6 +170,7 @@ class ZedCamera:
         init = sl.InitParameters()
         init.camera_resolution = res_map[resolution_str]
         init.camera_fps = fps
+        init.depth_mode = sl.DEPTH_MODE.NONE  # RGB only — skip GPU depth compute
         status = self.zed.open(init)
         if status != sl.ERROR_CODE.SUCCESS:
             raise RuntimeError(f"ZED camera open failed: {status}")
@@ -150,7 +183,9 @@ class ZedCamera:
         if self.zed.grab(sl.RuntimeParameters()) != sl.ERROR_CODE.SUCCESS:
             raise RuntimeError("ZED grab failed")
         self.zed.retrieve_image(self._mat, sl.VIEW.LEFT)
-        return self._mat.get_data()[:, :, :3]  # BGRA → BGR
+        # get_data() returns a view into the reused Mat buffer — copy, or every
+        # stored frame aliases the same memory and saved videos are static.
+        return self._mat.get_data()[:, :, :3].copy()  # BGRA → BGR
 
     def close(self):
         self.zed.close()
@@ -280,7 +315,16 @@ class Recorder:
             print("  Robot connected.")
 
             self.gripper = None
-            if args.gripper_port:
+            if args.gripper_urcap:
+                try:
+                    self.gripper = URCapGripper(args.robot_ip)
+                    pos = self.gripper.get_current_position()
+                    print(f"  Robotiq gripper connected via URCap "
+                          f"({args.robot_ip}:{URCapGripper.PORT}), position {pos}.")
+                except Exception as e:
+                    print(f"  WARNING: URCap gripper connect failed ({e}). Using 0.0.")
+                    self.gripper = None
+            elif args.gripper_port:
                 if HAS_ROBOTIQ:
                     try:
                         self.gripper = RobotiqGripper()
@@ -398,11 +442,18 @@ class Recorder:
         self.cam_left.close()
         self.cam_right.close()
         self.cam_wrist.close()
+        if self.gripper is not None and hasattr(self.gripper, "close"):
+            self.gripper.close()
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _camera_device(value: str):
+    """argparse type: numeric cv2 index, or a /dev device path string."""
+    return int(value) if value.isdigit() else value
+
 
 def main():
     p = argparse.ArgumentParser(
@@ -410,10 +461,11 @@ def main():
     )
     p.add_argument("--robot-ip", default="100.80.196.7", help="UR5e controller IP address (required unless --mock)")
     p.add_argument("--output-dir", required=True, help="Output dataset directory")
-    p.add_argument("--left-camera-id", type=int, default=0,
-                   help="cv2 device index for left_camera (USB, external view 1)")
-    p.add_argument("--wrist-camera-id", type=int, default=2,
-                   help="cv2 device index for wrist_camera (USB)")
+    p.add_argument("--left-camera-id", type=_camera_device, default=DEFAULT_LEFT_CAMERA,
+                   help="left_camera (USB, external view 1): cv2 index or stable "
+                        "device path, e.g. /dev/v4l/by-path/...-video-index0")
+    p.add_argument("--wrist-camera-id", type=_camera_device, default=DEFAULT_WRIST_CAMERA,
+                   help="wrist_camera (USB): cv2 index or stable device path")
     p.add_argument("--fps", type=int, default=15, help="Recording frequency in Hz")
     p.add_argument("--task", default="robot task",
                    help="Task description string stored in annotation.task")
@@ -421,6 +473,9 @@ def main():
                    help="ZED2i capture resolution (right_camera)")
     p.add_argument("--gripper-port", default=None,
                    help="Robotiq gripper serial port, e.g. /dev/ttyUSB0 (optional)")
+    p.add_argument("--gripper-urcap", action="store_true",
+                   help="Read the Robotiq gripper via the URCap socket server "
+                        "on the robot controller (tool-connector wiring, port 63352)")
     p.add_argument("--episode-start", type=int, default=0,
                    help="Starting episode index — use to resume a previous recording session")
     p.add_argument("--mock", action="store_true",
