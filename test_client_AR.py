@@ -37,13 +37,17 @@ RELATIVE_OFFSETS = [-23, -16, -8, 0]
 ACTION_HORIZON = 24
 
 
-def load_all_frames(video_path: str) -> np.ndarray:
+def load_all_frames(video_path: str, resolution: tuple | None = None) -> np.ndarray:
+    """Load a video as RGB frames, resized to (h, w) `resolution` if given."""
     cap = cv2.VideoCapture(video_path)
     frames = []
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+        if resolution is not None and frame.shape[:2] != tuple(resolution):
+            h, w = resolution
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     cap.release()
     if not frames:
@@ -51,11 +55,11 @@ def load_all_frames(video_path: str) -> np.ndarray:
     return np.stack(frames, axis=0)
 
 
-def load_camera_frames() -> dict[str, np.ndarray]:
+def load_camera_frames(resolution: tuple | None = None) -> dict[str, np.ndarray]:
     camera_frames: dict[str, np.ndarray] = {}
     for cam_key, fname in CAMERA_FILES.items():
         path = os.path.join(VIDEO_DIR, fname)
-        camera_frames[cam_key] = load_all_frames(path)
+        camera_frames[cam_key] = load_all_frames(path, resolution)
         logging.info(f"Loaded {cam_key}: {camera_frames[cam_key].shape}")
     return camera_frames
 
@@ -134,7 +138,7 @@ def test_ar_droid_policy_server(
     host: str = "localhost",
     port: int = 5000,
     num_chunks: int = 15,
-    prompt: str = "Move the pan forward and use the brush in the middle of the plates to brush the inside of the pan",
+    prompt: str = "Pick and place the ball",
     use_zero_images: bool = False,
 ):
     logging.info(f"Connecting to AR_droid server at {host}:{port}...")
@@ -175,7 +179,9 @@ def test_ar_droid_policy_server(
         return
 
     logging.info("Loading real video frames from debug_image/ directory")
-    camera_frames = load_camera_frames()
+    # Resize to the server's expected input resolution (server metadata (h, w)) —
+    # the transform pipeline rejects mismatched resolutions, e.g. raw 640x480 videos.
+    camera_frames = load_camera_frames(server_config.image_resolution)
 
     total_frames = min(v.shape[0] for v in camera_frames.values())
     logging.info(f"Total frames available: {total_frames}")

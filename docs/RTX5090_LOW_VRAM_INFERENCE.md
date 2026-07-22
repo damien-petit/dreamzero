@@ -51,11 +51,21 @@ Text encoder CPU offload enabled; keeping text encoder on CPU.
 INFO:websockets.server:server listening on 0.0.0.0:5000
 ```
 
-## Test it
+## Test it (client)
+
+In a second terminal:
 
 ```bash
+conda activate dreamzero
 python test_client_AR.py --port 5000
 ```
+
+The client streams frames from the `debug_image/*.mp4` videos and resizes them to the
+resolution the server advertises in its metadata (`image_resolution=(180, 320)`), so
+the videos there can be any resolution. Note the current `debug_image/` clips are
+640×480 UR5e captures (the original 320×180 DROID clips are in
+`debug_image/original/`) — the DROID model will run on them but the actions are not
+meaningful for the UR5e scene; restore the originals for a representative smoke test.
 
 Expected: the first call takes ~5–10 s (streamed text encoding + warmup), subsequent
 calls ~2.6–3.0 s with `Text Encoder 0.00 seconds` (prompt-embedding cache hit). Actions
@@ -116,3 +126,19 @@ Unconditional improvements that also help other machines:
 | `Expected all tensors to be on the same device` in the text encoder | Inputs were routed to CPU because device resolution used the offloaded T5; fixed in `WANPolicyHead.device` / `VLA.prepare_input` — make sure both changes are present. |
 | CUDA OOM at episode end with `DZ_CFG_SCALE=5.0` | Expected on 32 GB — CFG needs ~6.5 GB more than the card has. Use `DZ_CFG_SCALE=1.0`. |
 | First call very slow (~10 s) | Normal: streamed T5 encoding + CUDA warmup. Subsequent calls hit the prompt cache. |
+| `VideoToTensor: ... has invalid resolution (640, 480), expected (320, 180)` | The client sent raw video frames without resizing. Fixed in `test_client_AR.py` (resizes to the server's advertised `image_resolution`) — update your client if you see this. |
+
+## Alternative: Wan2.2 5B server (lower VRAM, no special flags)
+
+The Wan2.2-TI2V-5B checkpoint (`checkpoints/dreamzero_droid_wan22_lora`) fits on the
+5090 without any low-VRAM machinery and is the faster option:
+
+```bash
+bash launch_server_WAN22_v2.sh          # serves on port 5000, saves rollout videos
+python test_client_AR.py --port 5000    # same client
+```
+
+`launch_server_WAN22_v2.sh` uses `eval_utils/serve_dreamzero_wan22.py`, which resets
+the start frame between episodes and wraps VAE decode in `no_grad` (prefer it over the
+older `launch_server_WAN22.sh`). To serve a different fine-tune (e.g. a UR5e LoRA),
+change `--model_path` in the script.
