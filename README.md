@@ -11,7 +11,7 @@ DreamZero is a World Action Model that jointly predicts actions and videos, achi
 
 - **02/27:** DreamZero is **#1 on both [MolmoSpaces]([https://huggingface.co/spaces/ai2-adapt/MolmoSpaces](https://molmospaces.allen.ai/leaderboard)) and [RoboArena]([https://robo-arena.github.io/](https://robo-arena.github.io/leaderboard))**! DreamZero-DROID is trained *from scratch* using only the DROID dataset — no pretraining on large-scale robot data, unlike competing VLAs. This demonstrates the strength of video-model backbones for generalist robot policies (VAMs/WAMs).
 - **02/27:** Released **DreamZero-AgiBot checkpoint** and **post-training code** for efficient few-shot adaptation. Post-train on just ~30 minutes of play data for your specific robot, and see the robot do basic language following and pick-and-place (see YAM experiments in our paper for more detail).
-- **02/20:** Released the **full training codebase, preprocessed dataset, and guide for new embodiments** to replicate the DreamZero-DROID checkpoint and train on your own robot. See [Adding a New Embodiment to DreamZero](docs/DATASET_TO_GEAR_AND_TRAIN.md) for a step-by-step walkthrough.
+- **02/20:** Released the **full training codebase, preprocessed dataset, and guide for new embodiments** to replicate the DreamZero-DROID checkpoint and train on your own robot. See [Adding a New Embodiment to DreamZero](docs/DATASET_TO_GEAR_AND_TRAIN.md) for a step-by-step walkthrough. For UR5e-specific data collection and fine-tuning, see [UR5e Data Collection and Fine-Tuning](docs/UR5E_DATA_COLLECTION_AND_FINETUNING.md).
 
 ## Features
 
@@ -24,7 +24,7 @@ DreamZero is a World Action Model that jointly predicts actions and videos, achi
 - [RoboArena](https://robo-arena.github.io/) integration (DROID real)
 - Video generation and saving (MP4)
 - LoRA and full fine-tuning training scripts
-- Training on new embodiments (AgiBot, YAM) — see [guide](docs/DATASET_TO_GEAR_AND_TRAIN.md)
+- Training on new embodiments (AgiBot, YAM, UR5e) — see [general guide](docs/DATASET_TO_GEAR_AND_TRAIN.md) or [UR5e guide](docs/UR5E_DATA_COLLECTION_AND_FINETUNING.md)
 
 **Coming Soon**
 - [PolaRiS](https://polaris-evals.github.io/) simulation environment support

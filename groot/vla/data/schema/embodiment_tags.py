@@ -346,3 +346,8 @@ class EmbodimentTag(Enum):
     """
     The Mecka robot with hands.
     """
+
+    UR5E = "ur5e"
+    """
+    UR5e robot: 6-DOF joint position + 1 gripper, 3 cameras (left/right/wrist).
+    """
