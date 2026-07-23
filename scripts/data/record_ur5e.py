@@ -111,18 +111,44 @@ class MockCamera:
 # ---------------------------------------------------------------------------
 
 class URCapGripper:
-    """Robotiq gripper wired to the UR tool connector, read through the socket
-    server the Robotiq URCap runs on the controller (ASCII protocol, port 63352)."""
+    """Robotiq gripper wired to the UR tool connector, driven through the socket
+    server the Robotiq URCap runs on the controller (ASCII protocol, port 63352).
+
+    Reading (`get_current_position`) needs no activation; commanding
+    (`set_position`) requires `activate()` once after power-on."""
 
     PORT = 63352
 
     def __init__(self, robot_ip: str, timeout: float = 2.0):
         self.sock = socket.create_connection((robot_ip, self.PORT), timeout=timeout)
+        self._lock = threading.Lock()
+
+    def _cmd(self, command: str) -> str:
+        with self._lock:
+            self.sock.sendall(command.encode("ascii") + b"\n")
+            return self.sock.recv(1024).decode("ascii").strip()
 
     def get_current_position(self) -> int:
-        self.sock.sendall(b"GET POS\n")
-        reply = self.sock.recv(1024).decode("ascii")  # e.g. "POS 77"
+        reply = self._cmd("GET POS")  # e.g. "POS 77"
         return int(reply.split()[1])
+
+    def activate(self, speed: int = 255, force: int = 100, timeout: float = 10.0):
+        """Activate the gripper (if needed) and set motion parameters.
+        STA: 0=reset, 1=activating, 3=active."""
+        if self._cmd("GET STA").split()[1] != "3":
+            self._cmd("SET ACT 1")
+            deadline = time.monotonic() + timeout
+            while self._cmd("GET STA").split()[1] != "3":
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Robotiq gripper activation timed out")
+                time.sleep(0.2)
+        self._cmd("SET GTO 1")   # go-to mode: move on SET POS
+        self._cmd(f"SET SPE {max(0, min(255, speed))}")
+        self._cmd(f"SET FOR {max(0, min(255, force))}")
+
+    def set_position(self, pos: int):
+        """Command target position 0 (open) - 255 (closed). Non-blocking."""
+        self._cmd(f"SET POS {max(0, min(255, int(pos)))}")
 
     def close(self):
         self.sock.close()

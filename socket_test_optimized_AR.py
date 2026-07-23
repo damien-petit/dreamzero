@@ -92,6 +92,34 @@ class Args:
     fp8_dit: bool = False
     offload_text_encoder: bool = False
     low_vram: bool = False  # implies fp8_dit + offload_text_encoder
+    embodiment_tag: str = "oxe_droid"  # "oxe_droid" (DROID/Franka) or "ur5e"
+
+
+# Modality key mappings: client observation keys -> model input keys per embodiment.
+# Must match the served checkpoint's modality config (for ur5e:
+# modality_config_ur5e in groot/vla/configs/data/dreamzero/base_48_wan_fine_aug_relative.yaml).
+VIDEO_KEY_MAPPING = {
+    "oxe_droid": {
+        "observation/exterior_image_0_left": "video.exterior_image_1_left",
+        "observation/exterior_image_1_left": "video.exterior_image_2_left",
+        "observation/wrist_image_left": "video.wrist_image_left",
+    },
+    # left USB cam -> slot 0, ZED 2i -> slot 1, wrist USB cam -> wrist
+    "ur5e": {
+        "observation/exterior_image_0_left": "video.left_camera",
+        "observation/exterior_image_1_left": "video.right_camera",
+        "observation/wrist_image_left": "video.wrist_camera",
+    },
+}
+STATE_KEY_MAPPING = {
+    "oxe_droid": ("state.joint_position", "state.gripper_position"),
+    "ur5e": ("state.joint_position", "state.gripper_position"),
+}
+LANGUAGE_KEY_MAPPING = {
+    "oxe_droid": "annotation.language.action_text",
+    "ur5e": "annotation.task",
+}
+JOINT_DIM = {"oxe_droid": 7, "ur5e": 6}
 
 
 class ARDroidRoboarenaPolicy:
@@ -104,15 +132,21 @@ class ARDroidRoboarenaPolicy:
         groot_policy: GrootSimPolicy,
         signal_group: dist.ProcessGroup,
         output_dir: str | None = None,
+        embodiment_tag: str = "oxe_droid",
     ) -> None:
         self._policy = groot_policy
         self._signal_group = signal_group
         self._output_dir = output_dir
-        
+        self._embodiment_tag = (
+            embodiment_tag if embodiment_tag in VIDEO_KEY_MAPPING else "oxe_droid"
+        )
+        self._video_key_mapping = VIDEO_KEY_MAPPING[self._embodiment_tag]
+        self._state_keys = STATE_KEY_MAPPING[self._embodiment_tag]
+        self._language_key = LANGUAGE_KEY_MAPPING[self._embodiment_tag]
+        self._joint_dim = JOINT_DIM[self._embodiment_tag]
+
         self._frame_buffers: dict[str, list[np.ndarray]] = {
-            "video.exterior_image_1_left": [],
-            "video.exterior_image_2_left": [],
-            "video.wrist_image_left": [],
+            model_key: [] for model_key in self._video_key_mapping.values()
         }
         self._call_count = 0
         self._is_first_call = True
@@ -125,13 +159,7 @@ class ARDroidRoboarenaPolicy:
     
     def _convert_observation(self, obs: dict) -> dict:
         converted = {}
-        image_key_mapping = {
-            "observation/exterior_image_0_left": "video.exterior_image_1_left",
-            "observation/exterior_image_1_left": "video.exterior_image_2_left",
-            "observation/wrist_image_left": "video.wrist_image_left",
-        }
-        
-        for roboarena_key, droid_key in image_key_mapping.items():
+        for roboarena_key, droid_key in self._video_key_mapping.items():
             if roboarena_key in obs:
                 data = obs[roboarena_key]
                 if isinstance(data, np.ndarray):
@@ -153,23 +181,24 @@ class ARDroidRoboarenaPolicy:
                 video = np.stack(frames_to_use, axis=0)
                 converted[droid_key] = video
         
+        state_joint_key, state_gripper_key = self._state_keys
         if "observation/joint_position" in obs:
             joint_pos = obs["observation/joint_position"]
             if joint_pos.ndim == 1:
                 joint_pos = joint_pos.reshape(1, -1)
-            converted["state.joint_position"] = joint_pos.astype(np.float64)
+            converted[state_joint_key] = joint_pos.astype(np.float64)
         else:
-            converted["state.joint_position"] = np.zeros((1, 7), dtype=np.float64)
-        
+            converted[state_joint_key] = np.zeros((1, self._joint_dim), dtype=np.float64)
+
         if "observation/gripper_position" in obs:
             gripper_pos = obs["observation/gripper_position"]
             if gripper_pos.ndim == 1:
                 gripper_pos = gripper_pos.reshape(1, -1)
-            converted["state.gripper_position"] = gripper_pos.astype(np.float64)
+            converted[state_gripper_key] = gripper_pos.astype(np.float64)
         else:
-            converted["state.gripper_position"] = np.zeros((1, 1), dtype=np.float64)
-        
-        converted["annotation.language.action_text"] = obs.get("prompt", "")
+            converted[state_gripper_key] = np.zeros((1, 1), dtype=np.float64)
+
+        converted[self._language_key] = obs.get("prompt", "")
         return converted
     
     def _convert_action(self, action_dict: dict) -> np.ndarray:
@@ -490,7 +519,11 @@ def main(args: Args) -> None:
     os.environ["DZ_BF16_INIT"] = "1" if args.low_vram else os.environ.get("DZ_BF16_INIT", "0")
     torch._dynamo.config.recompile_limit = 800
 
-    embodiment_tag = "oxe_droid"
+    embodiment_tag = args.embodiment_tag
+    if embodiment_tag not in VIDEO_KEY_MAPPING:
+        raise SystemExit(
+            f"Unknown embodiment_tag '{embodiment_tag}' — known: {list(VIDEO_KEY_MAPPING)}"
+        )
     model_path = args.model_path
     policy_metadata = {
         "embodiment": embodiment_tag,
@@ -538,6 +571,7 @@ def main(args: Args) -> None:
         groot_policy=policy,
         signal_group=signal_group,
         output_dir=output_dir,
+        embodiment_tag=embodiment_tag,
     )
     
     server_config = PolicyServerConfig(

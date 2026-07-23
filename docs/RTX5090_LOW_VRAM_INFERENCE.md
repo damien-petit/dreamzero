@@ -142,3 +142,8 @@ python test_client_AR.py --port 5000    # same client
 the start frame between episodes and wraps VAE decode in `no_grad` (prefer it over the
 older `launch_server_WAN22.sh`). To serve a different fine-tune (e.g. a UR5e LoRA),
 change `--model_path` in the script.
+
+Both servers accept an embodiment tag for non-DROID fine-tunes (`--embodiment_tag ur5e`
+on the 5B server, `--embodiment-tag ur5e` on the 14B one). To execute the served policy
+on the real UR5e — including test modes that need no fine-tune — see
+[UR5E_REAL_DEPLOYMENT.md](UR5E_REAL_DEPLOYMENT.md).

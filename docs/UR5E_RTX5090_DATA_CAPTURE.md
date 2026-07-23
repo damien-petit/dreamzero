@@ -3,7 +3,8 @@
 How to check the camera views and record UR5e demonstrations on the lab RTX 5090
 (x86_64) machine. For the follow-up steps — GEAR conversion and fine-tuning — see
 [UR5E_DATA_COLLECTION_AND_FINETUNING.md](UR5E_DATA_COLLECTION_AND_FINETUNING.md)
-(its ZED ARM64 install section applies to the GX10, not this machine).
+(its ZED ARM64 install section applies to the GX10, not this machine). To run a
+trained policy on the robot, see [UR5E_REAL_DEPLOYMENT.md](UR5E_REAL_DEPLOYMENT.md).
 
 ---
 

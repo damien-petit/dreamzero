@@ -124,12 +124,21 @@ VIDEO_KEY_MAPPING = {
         "observation/exterior_image_1_left": "video.exterior_image_2_left",
         "observation/wrist_image_left": "video.wrist_image_left",
     },
+    # UR5e fine-tune (modality_config_ur5e in base_48_wan_fine_aug_relative.yaml):
+    # left USB cam -> slot 0, ZED 2i -> slot 1, wrist USB cam -> wrist.
+    "ur5e": {
+        "observation/exterior_image_0_left": "video.left_camera",
+        "observation/exterior_image_1_left": "video.right_camera",
+        "observation/wrist_image_left": "video.wrist_camera",
+    },
 }
 STATE_KEY_MAPPING = {
     "oxe_droid": ("state.joint_position", "state.gripper_position"),
+    "ur5e": ("state.joint_position", "state.gripper_position"),
 }
 LANGUAGE_KEY_MAPPING = {
     "oxe_droid": "annotation.language.action_text",
+    "ur5e": "annotation.task",
 }
 
 
